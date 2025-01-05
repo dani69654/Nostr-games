@@ -5,7 +5,6 @@ import NDK, {
 } from '@nostr-dev-kit/ndk';
 import { invariant } from '../utils/invariant';
 import {
-  createSharedSecret,
   decryptDM,
   dm,
   generateKeyPair,
@@ -14,8 +13,6 @@ import {
   note,
   subscribeToEvent,
 } from '../utils/nostr';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import * as nobleSecp256k1 from '@noble/secp256k1';
 import { createKeyPair } from '../utils/ecash';
 import { getDecodedToken } from '@cashu/cashu-ts';
 import crypto from 'crypto';
@@ -28,97 +25,178 @@ type Game = {
 export const COINFLIP_NDK_FILTER = [
   {
     kinds: [NDKKind.Text],
-    '#t': ['gamect'],
+    '#t': ['nostr-game=cf'],
     since: Math.floor(Date.now() / 1000),
   },
 ];
 
-export const createCoinflip = async (args: { game: NDKEvent; ndk: NDK }) => {
-  // Validate game data
-  invariant(isGame(args.game.content), 'Invalid game data');
-  const game = JSON.parse(args.game.content) as Game;
+export const createCoinflip = async ({
+  game: rawGame,
+  ndk,
+}: {
+  game: NDKEvent;
+  ndk: NDK;
+}) => {
+  const game = decodeGame(rawGame.content);
+  invariant(isGame(game), 'Invalid game data');
 
-  // Generate game account
+  // Game account
   const nostrGameKeys = generateKeyPair();
   console.log('Game account:', {
     nsec: nip19EncodeNsec(nostrGameKeys.secretKey),
     npub: nip19EncodeNpub(nostrGameKeys.publicKey),
   });
+  ndk.signer = new NDKPrivateKeySigner(nostrGameKeys.secretKey);
 
-  // Add signer to ndk using the game account
-  const signer = new NDKPrivateKeySigner(nostrGameKeys.secretKey);
-  Object.assign(args.ndk, { signer });
-
-  // Generate ecash key pair for the player 1
+  // eCash key pair for Player 1
   const eCashKeys = createKeyPair();
 
-  // Create DM to send to player 1 with the game recap and the ecash pubkey where funds have to be locked
-  await dm(args.ndk, {
-    text: `You are about to create a new coin toss game. Your choice is ${game.side}. Lock ecash to this pubkey to proceed ${eCashKeys.publicKey}. Answer this DM with ecash to continue.`,
+  // DM to player 1 (game recap & ecash pubkey)
+  await dm(ndk, {
+    text: `
+          🎲 New Coin Toss game! You chose "${game.side}". \n
+          Lock ecash to this pubkey to proceed: ${eCashKeys.publicKey} \n
+          Reply with the ecash token to continue.
+          `,
     fromSecretKey: nostrGameKeys.secretKey,
     fromPubkey: nostrGameKeys.publicKey,
-    toPubkey: args.game.pubkey,
+    toPubkey: rawGame.pubkey,
   });
 
-  // Create DM and auto send it Game account with the ecash pubkey AND secret key, the winner will use it to redeem the funds
-  await dm(args.ndk, {
-    text: `Redeem ecash using this this secret key: ${eCashKeys.privateKey}`,
-    fromSecretKey: nostrGameKeys.secretKey,
-    fromPubkey: nostrGameKeys.publicKey,
-    toPubkey: nostrGameKeys.publicKey,
-  });
-
-  // subscribe to DM response from player 1
-  const dmRespSub = subscribeToEvent(args.ndk, {
+  // Subscribe to player's DM response
+  const dmRespSub = subscribeToEvent(ndk, {
     filters: [
       {
         kinds: [NDKKind.EncryptedDirectMessage],
         since: Math.floor(Date.now() / 1000),
-        authors: [args.game.pubkey], // who is sending
-        '#p': [nostrGameKeys.publicKey], // who it’s sent to
+        authors: [rawGame.pubkey],
+        '#p': [nostrGameKeys.publicKey],
       },
     ],
     opts: { closeOnEose: false },
-    onEvent: async (e) => {
+    onEvent: async (playerEvent) => {
       try {
         const decrypted = decryptDM({
-          text: e.content,
+          text: playerEvent.content,
           sk: nostrGameKeys.secretKey,
-          pk: e.pubkey,
+          pk: playerEvent.pubkey,
         });
 
-        // Decode ecash
         const ecashDecoded = getDecodedToken(decrypted);
+        invariant(ecashDecoded.proofs.length > 0, 'No proofs found');
 
-        // Ensure that secret  data eCashKeys.pubkey
-        const secretParsed = JSON.parse(ecashDecoded.proofs[0].secret);
-
-        invariant(secretParsed[0] === 'P2PK', 'Invalid ecash proof data');
-        invariant(
-          secretParsed[1].data === eCashKeys.publicKey,
-          'Invalid ecash proof data'
-        );
-        invariant(ecashDecoded.proofs[0].amount > 0, 'Invalid ecash amount');
+        let totalAmount = 0;
+        ecashDecoded.proofs.forEach((proof) => {
+          const secretParsed = JSON.parse(proof.secret);
+          invariant(secretParsed[0] === 'P2PK', 'Invalid ecash proof data');
+          invariant(
+            secretParsed[1].data === eCashKeys.publicKey,
+            'Invalid ecash proof data'
+          );
+          invariant(proof.amount > 0, 'Invalid ecash amount');
+          totalAmount += proof.amount;
+        });
 
         console.log('New coinflip game started!');
 
-        // publish note with the game data
-        await note(args.ndk, {
-          text: `New game started with ${ecashDecoded.proofs[0].amount} ecash locked to ${game.side}. The ecash mint is ${ecashDecoded.mint} and the token is ${decrypted}`,
+        // Publish main game note
+        const noteEvent = await note(ndk, {
+          text: `
+                🎉 Coin Toss Game Started! \n
+                🔒 Locked ${totalAmount} ${ecashDecoded.unit}  (ecash) on "${game.side}". \n
+                Mint: ${ecashDecoded.mint} \n
+                Pubkey: ${eCashKeys.publicKey} \n
+                Reply to this note with your ecash token to join! \n
+                `,
           pubkey: nostrGameKeys.publicKey,
         });
-      } catch (e) {
-        console.error('Error:', e);
+        dmRespSub.stop();
+
+        // Subscribe to game note replies
+        const noteRespSub = subscribeToEvent(ndk, {
+          filters: [
+            {
+              kinds: [NDKKind.Text],
+              '#e': [noteEvent.id],
+              since: Math.floor(Date.now() / 1000),
+            },
+          ],
+          opts: { closeOnEose: false },
+          onEvent: async (event) => {
+            try {
+              // Check if content is an ecash token
+              const decoded = getDecodedToken(event.content);
+
+              let total = 0;
+              decoded.proofs.forEach((proof) => {
+                const secretParsed = JSON.parse(proof.secret);
+                invariant(
+                  secretParsed[0] === 'P2PK',
+                  'Invalid ecash proof data'
+                );
+                invariant(
+                  secretParsed[1].data === eCashKeys.publicKey,
+                  'Invalid ecash proof data'
+                );
+                invariant(proof.amount > 0, 'Invalid ecash amount');
+                total += proof.amount;
+              });
+              invariant(total === totalAmount, 'Invalid total amount');
+              invariant(decoded.mint === ecashDecoded.mint, 'Invalid mint');
+
+              // Random coin toss result
+              const result =
+                crypto.randomBytes(1)[0] % 2 === 0 ? 'head' : 'tail';
+              await note(ndk, {
+                text: `🪙 The coin shows: "${result}"!`,
+                pubkey: nostrGameKeys.publicKey,
+              });
+
+              // Determine winner
+              const winnerPubkey =
+                result === game.side ? rawGame.pubkey : event.pubkey;
+
+              // DM winner with privateKey
+              await dm(ndk, {
+                text: `
+                      🏆 You won! Redeem ecash with this secret key: ${eCashKeys.privateKey} \n
+                      Mint: ${ecashDecoded.mint} \n
+                      ${event.content} \n
+                      ${decrypted} \n
+                      `,
+                fromSecretKey: nostrGameKeys.secretKey,
+                fromPubkey: nostrGameKeys.publicKey,
+                toPubkey: winnerPubkey,
+              });
+              noteRespSub.stop();
+            } catch {}
+          },
+        });
+      } catch (err) {
+        console.error('Error:', err);
       }
     },
   });
 };
 
-const isGame = (game: unknown): game is Game => {
-  if (typeof game !== 'string') return false;
+// 'create:head' | 'create:tail'
+const decodeGame = (game: string): Game | null => {
+  if (typeof game !== 'string') return null;
   try {
-    const data = JSON.parse(game);
-    return data.action === 'create' && ['head', 'tail'].includes(data.side);
+    const command = game.trim().split(/\s+/);
+    const [action, side] = command[1].split(':');
+    return {
+      action: action as Game['action'],
+      side: side as Game['side'],
+    };
+  } catch {
+    return null;
+  }
+};
+
+const isGame = (game: Game | null): game is Game => {
+  try {
+    return game?.action === 'create' && ['head', 'tail'].includes(game.side);
   } catch {
     return false;
   }

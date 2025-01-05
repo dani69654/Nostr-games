@@ -23,12 +23,7 @@ const main = async () => {
   subscribeToEvent(ndk, {
     filters: COINFLIP_NDK_FILTER,
     opts: { closeOnEose: false },
-    onEvent: (e) => {
-      if (e.content.includes('#gamect')) {
-        e.content = e.content.replace('#gamect', '');
-      }
-      createCoinflip({ game: e, ndk });
-    },
+    onEvent: (game) => createCoinflip({ game, ndk }),
   });
 };
 

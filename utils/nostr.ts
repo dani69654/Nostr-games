@@ -155,4 +155,6 @@ export const note = async (
   });
 
   await note.publish();
+
+  return note;
 };
