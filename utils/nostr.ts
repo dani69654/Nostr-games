@@ -4,6 +4,7 @@ import NDK, {
   NDKFilter,
   NDKKind,
   NDKSubscriptionOptions,
+  NDKTag,
 } from '@nostr-dev-kit/ndk';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import crypto from 'crypto';
@@ -143,11 +144,12 @@ export const note = async (
   args: {
     text: string;
     pubkey: string;
+    tags?: NDKTag[];
   }
 ) => {
   const note = new NDKEvent(ndk, {
     kind: NDKKind.Text,
-    tags: [],
+    tags: args.tags || [],
     created_at: Math.floor(Date.now() / 1000),
     content: args.text,
     pubkey: args.pubkey,

@@ -16,6 +16,7 @@ import {
 import { createKeyPair } from '../utils/ecash';
 import { getDecodedToken } from '@cashu/cashu-ts';
 import crypto from 'crypto';
+import { MASTER_NEW_GAME_TAG, newGameNote } from './master';
 
 type Game = {
   action: 'create' | 'play';
@@ -33,9 +34,11 @@ export const COINFLIP_NDK_FILTER = [
 export const createCoinflip = async ({
   game: rawGame,
   ndk,
+  master,
 }: {
   game: NDKEvent;
   ndk: NDK;
+  master: NDK;
 }) => {
   const game = decodeGame(rawGame.content);
   invariant(isGame(game), 'Invalid game data');
@@ -109,8 +112,14 @@ export const createCoinflip = async ({
                 Reply to this note with your ecash token to join! \n
                 `,
           pubkey: nostrGameKeys.publicKey,
+          tags: [['t', MASTER_NEW_GAME_TAG]],
         });
         dmRespSub.stop();
+
+        const masterNewGameNote = await newGameNote({
+          game: noteEvent,
+          master,
+        });
 
         // Subscribe to game note replies
         const noteRespSub = subscribeToEvent(ndk, {
@@ -147,33 +156,36 @@ export const createCoinflip = async ({
               // Random coin toss result
               const result =
                 crypto.randomBytes(1)[0] % 2 === 0 ? 'head' : 'tail';
-              await note(ndk, {
-                text: `🪙 The coin shows: "${result}"!`,
-                pubkey: nostrGameKeys.publicKey,
-              });
 
               // Determine winner
               const winnerPubkey =
                 result === game.side ? rawGame.pubkey : event.pubkey;
 
-              // DM winner with privateKey
-              await dm(ndk, {
-                text: `
-                      🏆 You won! Redeem ecash with this secret key: ${eCashKeys.privateKey} \n
-                      Mint: ${ecashDecoded.mint} \n
-                      ${event.content} \n
-                      ${decrypted} \n
-                      `,
-                fromSecretKey: nostrGameKeys.secretKey,
-                fromPubkey: nostrGameKeys.publicKey,
-                toPubkey: winnerPubkey,
-              });
+              await Promise.allSettled([
+                note(ndk, {
+                  text: `🪙 The coin shows: "${result}"!`,
+                  pubkey: nostrGameKeys.publicKey,
+                }),
+                noteEvent.delete(),
+                masterNewGameNote?.delete(),
+                dm(ndk, {
+                  text: `
+                        🏆 You won! Redeem ecash with this secret key: ${eCashKeys.privateKey} \n
+                        Mint: ${ecashDecoded.mint} \n
+                        ${event.content} \n
+                        ${decrypted} \n
+                        `,
+                  fromSecretKey: nostrGameKeys.secretKey,
+                  fromPubkey: nostrGameKeys.publicKey,
+                  toPubkey: winnerPubkey,
+                }),
+              ]);
               noteRespSub.stop();
             } catch {}
           },
         });
       } catch (err) {
-        console.error('Error:', err);
+        //console.error('Error:', err);
       }
     },
   });

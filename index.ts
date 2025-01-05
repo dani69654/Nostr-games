@@ -2,23 +2,23 @@ import WebSocket from 'ws';
 import { connectNDK, subscribeToEvent } from './utils/nostr';
 import { COINFLIP_NDK_FILTER, createCoinflip } from './modules/coinflip';
 import http from 'http';
+import { initMaster } from './modules/master';
 
 // @ts-ignore
 global.WebSocket = WebSocket;
 
 const main = async () => {
   const ndk = await connectNDK();
+  const master = await initMaster();
   console.log('🔌 Connected to NDK');
-
   subscribeToEvent(ndk, {
     filters: COINFLIP_NDK_FILTER,
     opts: { closeOnEose: false },
-    onEvent: (game) => createCoinflip({ game, ndk }),
+    onEvent: (game) => createCoinflip({ game, ndk, master }),
   });
 };
 
-// Add an HTTP server to bind to $PORT (required by Heroku)
-const PORT = process.env.PORT || 3000; // Fallback to 3000 for local testing
+const PORT = process.env.PORT || 3000;
 
 http
   .createServer((_, res) => {
