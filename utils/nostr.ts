@@ -3,7 +3,6 @@ import NDK, {
   NDKEvent,
   NDKFilter,
   NDKKind,
-  NDKPrivateKeySigner,
   NDKSubscriptionOptions,
 } from '@nostr-dev-kit/ndk';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
